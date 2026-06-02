@@ -5,11 +5,18 @@ import Foundation
 ///
 /// Registry: https://github.com/NSEvent/gemini-model-registry
 ///
-/// Usage:
+/// Usage at call site:
 ///   let model = GeminiModelRegistry.shared.flashModel
-///   // call GeminiModelRegistry.shared.refreshIfStale() once on app launch
-@MainActor
-final class GeminiModelRegistry: ObservableObject {
+///   // Make request. If Gemini returns a deprecation error, recover:
+///   if GeminiModelRegistry.isDeprecationError(statusCode: status, body: data) {
+///       switch await GeminiModelRegistry.shared.recoverFromDeprecation(failedModel: model, alias: "flash") {
+///       case .retry(let newModel): // rebuild request with newModel, send once more
+///       case .giveUp: throw GeminiModelRegistry.ModelUnavailableError()
+///       }
+///   }
+///
+/// Thread-safe. UserDefaults-backed so reads are O(1) from any queue.
+final class GeminiModelRegistry: @unchecked Sendable {
     static let shared = GeminiModelRegistry()
 
     private static let registryURL = URL(
@@ -28,31 +35,72 @@ final class GeminiModelRegistry: ObservableObject {
         "pro": "gemini-2.5-pro"
     ]
 
-    @Published private var models: [String: String]
-
     private init() {
-        if let cached = UserDefaults.standard.dictionary(forKey: Self.cacheKey) as? [String: String],
-           !cached.isEmpty {
-            self.models = cached
-        } else {
-            self.models = Self.bundledDefaults
-        }
         refreshIfStale()
     }
 
-    var flashModel: String { models["flash"] ?? Self.bundledDefaults["flash"]! }
-    var flashLiteModel: String { models["flash-lite"] ?? Self.bundledDefaults["flash-lite"]! }
-    var proModel: String { models["pro"] ?? Self.bundledDefaults["pro"]! }
+    var flashModel: String { resolve("flash") }
+    var flashLiteModel: String { resolve("flash-lite") }
+    var proModel: String { resolve("pro") }
+
+    private func resolve(_ alias: String) -> String {
+        if let cached = UserDefaults.standard.dictionary(forKey: Self.cacheKey) as? [String: String],
+           let value = cached[alias] {
+            return value
+        }
+        return Self.bundledDefaults[alias] ?? Self.bundledDefaults["flash"]!
+    }
 
     func refreshIfStale() {
         let lastFetch = UserDefaults.standard.double(forKey: Self.cacheTimestampKey)
         let age = Date().timeIntervalSince1970 - lastFetch
         guard age >= Self.cacheTTL else { return }
-        Task { await Self.fetch() }
+        Task.detached { await Self.fetch() }
     }
 
     func refresh() {
-        Task { await Self.fetch() }
+        Task.detached { await Self.fetch() }
+    }
+
+    // MARK: - Deprecation recovery
+
+    /// Returns true if the given HTTP response from the Gemini REST API indicates
+    /// the requested model is deprecated or no longer available. Matches Google's
+    /// current error wording; tolerant to phrasing drift.
+    static func isDeprecationError(statusCode: Int, body: Data?) -> Bool {
+        guard statusCode >= 400, let body, let str = String(data: body, encoding: .utf8) else {
+            return false
+        }
+        let lower = str.lowercased()
+        return lower.contains("no longer available")
+            || lower.contains("is not found for api version")
+            || lower.contains("is not supported")
+            || lower.contains("has been deprecated")
+    }
+
+    enum RecoveryOutcome {
+        /// Registry refresh produced a different model ID for this alias; caller should retry once.
+        case retry(newModel: String)
+        /// Registry has no different model to offer (already current, or fetch failed); caller should give up.
+        case giveUp
+    }
+
+    /// Call this when a Gemini API request fails with a deprecation error.
+    /// Force-refreshes the registry, then reports whether the alias now resolves
+    /// to a different model so the caller can retry.
+    func recoverFromDeprecation(failedModel: String, alias: String) async -> RecoveryOutcome {
+        await Self.fetch()
+        let fresh = resolve(alias)
+        return fresh != failedModel ? .retry(newModel: fresh) : .giveUp
+    }
+
+    /// Error to throw when recovery fails — the API rejected the model and the
+    /// registry has no working replacement. The default localizedDescription is
+    /// designed to flow through existing per-app error UIs unchanged.
+    struct ModelUnavailableError: LocalizedError {
+        var errorDescription: String? {
+            "This app's AI model is no longer available. Please update the app to the latest version."
+        }
     }
 
     private static func fetch() async {
@@ -66,11 +114,8 @@ final class GeminiModelRegistry: ObservableObject {
             !decoded.models.isEmpty
         else { return }
 
-        await MainActor.run {
-            UserDefaults.standard.set(decoded.models, forKey: cacheKey)
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
-            shared.models = decoded.models
-        }
+        UserDefaults.standard.set(decoded.models, forKey: cacheKey)
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
     private struct RegistryFile: Decodable {
