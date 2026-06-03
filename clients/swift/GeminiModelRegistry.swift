@@ -64,7 +64,10 @@ final class GeminiModelRegistry: @unchecked Sendable {
     }
 
     private init() {
-        refreshIfStale()
+        // Always refresh on cold launch — the JSON is tiny and runs in a detached
+        // task, so this never blocks startup, and Kevin's registry edits propagate
+        // on the next relaunch instead of waiting for the 24h TTL.
+        refresh()
     }
 
     // MARK: - Model ID resolution
