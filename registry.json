@@ -2,14 +2,15 @@
   "schemaVersion": 1,
   "updated": "2026-06-02",
   "models": {
-    "gemini9": "gemini-9.9-flash",
+    "flash": "gemini-3.5-flash",
+    "flash-lite": "gemini-3.1-flash-lite",
     "pro": "gemini-2.5-pro"
   },
   "tiers": [
     {
-      "alias": "gemini9",
-      "displayName": "Gemini 9.9 Flash",
-      "description": "Future model, hot off the registry"
+      "alias": "flash",
+      "displayName": "Gemini 3.5 Flash",
+      "description": "Fast, latest model"
     },
     {
       "alias": "pro",
